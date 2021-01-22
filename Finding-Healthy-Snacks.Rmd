@@ -1,0 +1,318 @@
+---
+title: "Finding Healthy Snacks"
+author: "Hafiz Khusyairi"
+date: "22/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+
+Health Star Rating (HSR) has its legitimate criticisms. Such examples include the concern that one number cannot summarise various nutritional factors and that the non-compulsory nature is limiting its usefulness. With that said, keeping up with various nutritional components such as saturated fat, fibre, etc can be time and energy-consuming. HSR with all its weaknesses is still a convenient and straightforward method for people who are looking out for their consumptions.
+
+I want to use the HSR function I programmed in a previously published repository to find some new snacks that are relatively healthier and available from a supermarket near my house. Therefore, I used the webscraper browser extension (http://webscraper.io) to scrape the nutritional information and ingredients list of all the snacks from this retailer's website. I then clean the data and apply the HSR function to the nutritional informations of these items.
+
+To document this process here, I cannot display the data that I used. Therefore, I disguised the dataset by sampling 300 items (out of the list of more than 1000 items) and making sure to delete all the identifying information (brand names, variants, flavours, etc). I only document the cleaning process but not the exploration process that helped me decide how to clean the data.
+
+Disclaimer: The health star rating produced by the method documented here is only an approximation and most likely underestimate the true health star for the following reasons.
+
+1. The new guide for HSR stipulate that minimally processed fruits and vegetables should receive 5 health stars. I do not take this new criterion into account. 
+
+2. There is no information on fibre for any of the product on the website I scraped. Therefore, in the calculation, I will use fibre = 0 gram for all item.
+
+3. Not all item list the percentage of fruits and vegetables in their ingredients list. For these items, I will use 0% as the percentages.
+
+4. I will only calculate items with complete information on energy, sugar, fat, and sodium. However, missing information on protein will be treated as if protein = 0 gram. This would also underestimate the health stars.
+
+To get more accurate health star rating of an item, I suggest consulting the product packaging or contacting the manufacturer.
+
+### The Dataset
+
+We first read the dataset to R and make some standard substitution (e.g. null to NA) and mixed-case to all lowercase (so using regular expression would be much easier).
+
+```{r, warning=F,message=F}
+library("Hmisc")
+library(readr)
+
+snacks = read.csv("sampledsnacks.csv",header = T,stringsAsFactors = F)
+
+#making all data columns lowercase
+snacks = apply(snacks,2,tolower)
+
+#substituting NA for null
+snacks = apply(snacks,2,function(x) ifelse(x=="null",NA,x))
+snacks = data.frame(snacks)
+```
+
+Here is what the dataset looks like
+
+```{r}
+data.frame(lapply(snacks[1:5,], substr, 1, 35))
+```
+
+There are two columns for the ingredients. This is due to the website format, some item has the ingredients list on display directly, and others only show ingredient list after the user click `view more` button. Some items have both because they have the short ingredients list and will show a longer ingredients list after the `view more` button is clicked.
+
+While I scrape individual nutrition (sugar, sodium, etc) per 100 ml/100 gr, this does not always work correctly. Sometimes, some of the information is missing and the numbers were recorded in another column. This is why I also scrape the whole nutrition table and save it in the nutrition column.
+
+### The Cleaning
+
+First, we want to remove some pesky substring "approx." that will mess with parsing numbers.
+
+```{r}
+snacks[,c(3,5:9)] = apply(snacks[,c(3,5:9)],2,function(x) gsub("approx.", "", x))
+```
+
+As I mentioned previously, some information was incomplete and this caused some numbers to be read by the wrong column (e.g. sodium number was found in sugar column). In this case, we want to replace these numbers with numbers we extract from the complete nutritional information from nutrition column. To do this, we define the following function
+
+```{r}
+#extracting individual nutrition data from nutrition column
+extractnut = function(s,keyword){
+  words = strsplit(s, '\\s+')[[1]]
+  inds = grep(keyword, words)
+  i = inds[1]
+  words[i+1]
+}
+```
+
+This function works by extracting the word just after an inputted keyword as this is where the nutritional quantity per 100 gr/100 ml are located. So if we want to extract the amount of protein, we will use "protein" as our keyword.
+
+We create new columns to save the extracted quantities from the nutrition column.
+
+```{r}
+snacks$saturated2 = sapply(snacks$nutrition,function(x) extractnut(x,"saturated"))
+snacks$sugar2 = sapply(snacks$nutrition,function(x) extractnut(x,"sugar"))
+snacks$sodium2 = sapply(snacks$nutrition,function(x) extractnut(x,"sodium"))
+snacks$energy2 = sapply(snacks$nutrition,function(x) extractnut(x,"energy"))
+snacks$Protein2 = sapply(snacks$nutrition,function(x) extractnut(x,"protein"))
+```
+
+Next, we want to replace all the rows where variables were mixed up using numbers from these newly extracted columns. We are not doing this for all rows because, in general, the original scraped data were better formatted. To find these problematic rows, we are comparing the old variable with the newly extracted variable. E.g. we compare `sugar` and `sugar2` column. If `sugar` is NA, but `sugar2` is not, then there is no data on sugar and some other number was put there. On the other hand, if `sugar2` is NA but `sugar` is not, then sugar data was probably incorrectly placed in another column.
+
+We perform this comparison for all columns and save the corresponding row numbers in variable `missing` and `added`.
+
+```{r}
+missing = rep(F,nrow(snacks))
+for(i in 5:9){
+  missing = missing|(is.na(snacks[,i]) & !is.na(snacks[,i+5]))
+}
+
+added = rep(F,nrow(snacks))
+for(i in 5:9){
+  added = added|(!is.na(snacks[,i]) & is.na(snacks[,i+5]))
+}
+
+sum(missing|added)
+```
+
+As we can see, there are two rows where this happens (there were many more on the original dataset). We replace the data on these rows with the ones we just extracted from the nutrition column.
+
+```{r}
+snacks[missing|added,c("energy","sodium","sugar","saturated","Protein")]=
+  snacks[missing|added,c("energy2","sodium2","sugar2","saturated2","Protein2")]
+```
+
+Finally, we parse the numbers from these cleaned columns and drop the units and other words (e.g. <1 gr, in the original data, we can find flavours/variants in these columns for multipack items).
+
+```{r}
+#parsing the number from nutrition columns
+snacks[,5:9] = apply(snacks[,5:9],2,parse_number)
+```
+
+This allows us to plot the histograms and see the distributions of these quantities.
+
+```{r}
+#plotting the histograms of nutritions informations
+
+ggplot(data=snacks, aes(x=energy)) +
+  geom_histogram(na.rm=TRUE, bins=30, fill="steelblue3", col="steelblue4") +
+  scale_x_continuous() +
+  labs(x="Energy (kJ)", y="Frequency", title="Histogram of Energy")
+
+ggplot(data=snacks, aes(x=sugar)) +
+  geom_histogram(na.rm=TRUE, bins=30, fill="steelblue3", col="steelblue4") +
+  scale_x_continuous() +
+  labs(x="Total sugar (gram)", y="Frequency", title="Histogram of Total Sugar")
+
+ggplot(data=snacks, aes(x=saturated)) +
+  geom_histogram(na.rm=TRUE, bins=30, fill="steelblue3", col="steelblue4") +
+  scale_x_continuous() +
+  labs(x="Saturated fat (gram)", y="Frequency", title="Histogram of Saturated fat")
+
+ggplot(data=snacks, aes(x=sodium)) +
+  geom_histogram(na.rm=TRUE, bins=30, fill="steelblue3", col="steelblue4") +
+  scale_x_continuous() +
+  labs(x="Sodium (mg)", y="Frequency", title="Histogram of Sodium")
+```
+
+There seem to be some data points that are quite different from the rest. I investigated all these items, and the all the numbers seem to be normal for what the items are (e.g. jerky has very high amount of sodium). I will not discuss my investigation but will leave the syntax here for those interested.
+
+```{r, eval=F}
+#finding item whose energy is lower than the contribution of sugar, protein, and saturated fat
+energytest = which(snacks$energy<0.9*(16.7*(snacks$sugar+snacks$Protein)+37.7*snacks$saturated))
+toolowcal = snacks[energytest,c("name","nutrition","energy","sugar","saturated","Protein")]
+
+toosweet = snacks[which(snacks$sugar>55),c("name","sugar","ingredients","ingredients_viewmore")]
+toosweet = toosweet[order(toosweet$sugar,decreasing = T),]
+
+toofatty = snacks[which(snacks$saturated>30),c("name","nutrition","saturated","ingredients","ingredients_viewmore")]
+toofatty = toofatty[order(toofatty$saturated,decreasing = T),]
+
+salty = snacks[which(snacks$sodium>1500),c("name","sodium","ingredients","ingredients_viewmore")]
+salty = salty[order(salty$sodium,decreasing = T),]
+```
+
+### The Fruit and Vegetable Percentage
+
+One of the challenges with applying Health Star Rating on this dataset is the so-called Vegetable points. We calculate this point using the percentage of concentrated and non-concentrated fruits and vegetables (fv) components in the food item. Unfortunately, this information is unavailable on the nutrition tables and has to be extracted from the ingredients list. Not all ingredients list on the website list these percentages and the items listing them usually list it for individual components (some of which are neither fruit nor vegetable). Therefore, the first thing I did was collecting all the 3 words before every percentage in ingredients lists and sort the top 150 terms by frequency of appearance. I then categorise these terms as concentrated fv, non-concentrated fv, and neither based on the criteria available from the HSR Calculator guide.
+
+```{r}
+# defining function that extract 3 words preceeding percentage
+extract3 = function(s){
+  words = strsplit(s, '\\s+')[[1]]
+  inds = grep("[0-9\\.]+%", words)
+  unlist(lapply(inds, FUN = function(i) {
+    c(words[max(1, i-3):min(length(words), i-1)])
+  }))
+}
+```
+
+I collated the top 150 terms using the original dataset. For those interested, I attach the code below.
+
+```{r, eval=F}
+#finding top 150 words before percentage in the ingredients list
+
+allingredients = "NA"
+test = lapply(snacks$ingredients,extract3)
+for(i in 1:nrow(snacks)){allingredients = c(allingredients,extract3(snacks$ingredients[i]))}
+for(i in 1:nrow(snacks)){allingredients = c(allingredients,extract3(snacks$ingredients_viewmore[i]))}
+allingredients =gsub("[0-9\\.]+%", "", allingredients)
+allingredients =gsub("\\(|\\)|,|contains|:|\\[|\\]|\\.", "", allingredients)
+top150 = data.frame(sort(table(allingredients), decreasing=T)[1:150])
+
+# saving it as a csv file to be manually marked using MS Excel
+write.csv(top150,"top150.csv", row.names = FALSE)
+
+```
+
+After manually categorising the top 150 terms as concentrated fv, non-concentrated fv, and neither, I use this new table (called top150marked.csv) to identify which category every percentage number in ingredients lists correspond to based on the three words that precede it.
+
+```{r}
+#reading the top150marked into R
+
+fruitveg = read.csv("top150marked.csv",header = T,stringsAsFactors = F)
+fruitveg$noncon = ifelse(is.na(fruitveg$noncon),F,T)
+fruitveg$concentrated = ifelse(is.na(fruitveg$concentrated),F,T)
+
+#some of the top 150 terms, their frequencies, and their categories
+head(fruitveg,20)
+
+# extracting those in top 150 categorised
+fvnoncon = fruitveg$allingredients[fruitveg$noncon]
+fvnoncon = append(fvnoncon,"dates")
+fvcon = fruitveg$allingredients[fruitveg$concentrated]
+
+# defining function extracting percentage of concentrated & non-concentrated fruit/veggie 
+#based on 3 words before the percentages
+
+extractnoncon = function(s){
+  words = strsplit(s, '\\s+')[[1]]
+  inds = grep("[0-9\\.]+%", words)
+  total = 0
+  for(i in inds) {
+    if(sum(c(words[max(1, i-3):min(length(words), i-1)]) %in% fvnoncon)>0 &
+       sum(c(words[max(1, i-3):min(length(words), i-1)]) %in% fvcon)==0 & 
+       sum(c(words[max(1, i-3):min(length(words), i-1)]) == "oil")==0){
+      total = total+parse_number(words[i])
+    }
+  }
+  total
+}
+
+extractconcentrated = function(s){
+  words = strsplit(s, '\\s+')[[1]]
+  inds = grep("[0-9\\.]+%", words)
+  total = 0
+  for(i in inds) {
+    if(sum(c(words[max(1, i-3):min(length(words), i-1)]) %in% fvcon)>0){
+      total = total+parse_number(words[i])
+    }
+  }
+  total
+}
+
+# first we extract the total percentage of concentrated and non-concentrated fv from both
+# ingredients and ingredients_viewmore columns separately
+
+snacks$noncon1 = sapply(snacks$ingredients,extractnoncon)
+snacks$concentrated1 = sapply(snacks$ingredients,extractconcentrated)
+snacks$noncon2 = sapply(snacks$ingredients_viewmore,extractnoncon)
+snacks$concentrated2 = sapply(snacks$ingredients_viewmore,extractconcentrated)
+
+#then we take the maximum to combine them into single column, respectively
+snacks$noncon = apply(snacks[,c("noncon1","noncon2")],1,max)
+snacks$concentrated = apply(snacks[,c("concentrated1","concentrated2")],1,max)
+```
+
+Now that we have extracted the percentages of concentrated and non-concentrated fv, it is time to do a little verification and check whether any of the percentage exceeds 100
+
+```{r}
+sum(snacks$noncon+snacks$concentrated>100)
+percentgreater100 = snacks[(snacks$noncon+snacks$concentrated>100),]
+percentgreater100[,c("ingredients","noncon","concentrated")]
+```
+
+As we can see, there are indeed some percentages totalling more than 100%. This is because these percentages are detailed (e.g. fruit juices (70%) [apple (65%), strawberry (1%), raspberry (1%), orange (1%), lemon (1%), pineapple (1%)]). This implies that these percentages are being double-counted. We handle it as follows.
+
+```{r}
+snacks$concentrated = ifelse(snacks$concentrated>100,snacks$concentrated/2,snacks$concentrated)
+```
+
+
+```{r}
+snacks$noncon = ifelse(snacks$concentrated>100,snacks$noncon/2,snacks$noncon)
+```
+
+There might be similar double-counting happening throughout the rest of the datasets. However, since I plan to eyeball the items with health star of more than 3.5 stars, I decide not to bother finding more of them.
+
+### The Health Stars
+
+Now that we have all the components to calculate Health Star (except the completely unavailable fibre data and other missing data), it is time to calculate these snack items' health star ratings. We first load the function I wrote previously (documentation is on HSR Food Function repo).
+
+```{r, warning=F,message=F}
+source("HSRFoodFunction.R")
+```
+
+Then I exclude all items where any information on energy, saturated fat, total sugar, and sodium is missing. This is because I choose to consistently underestimate the rating. I only include missing data if they underestimate the rating. If including missing data would overestimate the rating, then I would exclude the whole item. We calculate the ratings on this subset.
+
+```{r}
+snacks = snacks[!(is.na(snacks$energy)|is.na(snacks$saturated)|is.na(snacks$sugar)|is.na(snacks$sodium)),]
+snacks = snacks[c("id","ingredients","ingredients_viewmore","energy","saturated","sugar","sodium","concentrated","noncon","Protein")]
+
+
+for(i in 1:nrow(snacks)){
+  x = snacks[i,]
+  snacks$health_star[i] = HSRStar(x$energy,x$saturated,x$sugar,x$sodium,x$concentrated,x$noncon,x$Protein,0)
+}
+
+#tabulate
+table(snacks$health_star,useNA = "ifany")
+```
+
+The above table lists the number of items in each health star categories. Here is the complete list of the items getting 3.5 stars or more.
+
+```{r}
+healthysnacks = snacks[which(snacks$health_star>=3.5),
+                       c("id","health_star","ingredients","ingredients_viewmore","energy","saturated",
+                         "sugar","sodium","concentrated","noncon","Protein")]
+table(healthysnacks$health_star,useNA = "ifany")
+healthysnacks = healthysnacks[order(healthysnacks$health_star,decreasing = T),]
+data.frame(lapply(healthysnacks, substr, 1, 35))
+```
+
+
+
+
+
